@@ -2,11 +2,11 @@ name: CI/CD Deployment Pipeline
 
 on:
   push:
-    branches: [ master ]   # 👈 改成 master
-  workflow_dispatch:       # 可以手動觸發
+    branches: [ master ]
+  workflow_dispatch:
 
 permissions:
-  contents: write          # 需要權限建立 / 刪除 release
+  contents: write
 
 jobs:
   build:
@@ -32,6 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4   # 👈 新增 checkout
+
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
@@ -55,6 +58,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4   # 👈 新增 checkout
+
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
@@ -76,8 +82,11 @@ jobs:
   deploy-production:
     needs: deploy-staging
     runs-on: ubuntu-latest
-    environment: production   # 👈 這裡有 Required reviewers / Wait timer
+    environment: production
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4   # 👈 新增 checkout
+
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
