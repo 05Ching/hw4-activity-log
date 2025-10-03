@@ -3,10 +3,10 @@ name: CI Dev Deployment
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:   # 👈 允許手動觸發
+  workflow_dispatch:   # 允許手動執行，方便測試
 
 permissions:
-  contents: write  # 建立/刪除 release & tag 需要
+  contents: write  # 需要建立/刪除 release
 
 jobs:
   build:
@@ -48,9 +48,8 @@ jobs:
         run: |
           echo "Preparing release for tag $TAG ..."
           
-          # 如果 tag/release 已存在，先刪除避免失敗
+          # 如果 release 已存在，先刪掉避免衝突
           gh release delete "$TAG" -y || true
-          git push origin :refs/tags/$TAG || true
           
           # 建立新的 release
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
