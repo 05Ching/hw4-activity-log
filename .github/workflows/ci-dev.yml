@@ -2,6 +2,7 @@ name: CI Dev Deployment
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:   # 允許手動執行
 
 permissions:
   contents: write  # 需要有權限建立 release
