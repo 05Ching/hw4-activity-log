@@ -3,10 +3,10 @@ name: CI/CD Deployment Pipeline
 on:
   push:
     branches: [ master ]   # 👈 改成 master
-  workflow_dispatch:
+  workflow_dispatch:       # 可以手動觸發
 
 permissions:
-  contents: write
+  contents: write          # 需要權限建立 / 刪除 release
 
 jobs:
   build:
@@ -40,13 +40,9 @@ jobs:
       - name: Install GitHub CLI
         run: sudo apt-get update && sudo apt-get install -y gh
 
-      - name: Authenticate GitHub CLI
-        run: echo "${GITHUB_TOKEN}" | gh auth login --with-token
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Release Dev Build
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ vars.BUILD_TAG }}
           NOTE: ${{ vars.RELEASE_NOTE }}
         run: |
@@ -67,13 +63,9 @@ jobs:
       - name: Install GitHub CLI
         run: sudo apt-get update && sudo apt-get install -y gh
 
-      - name: Authenticate GitHub CLI
-        run: echo "${GITHUB_TOKEN}" | gh auth login --with-token
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Release Staging Build
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ vars.BUILD_TAG }}
           NOTE: ${{ vars.RELEASE_NOTE }}
         run: |
@@ -84,7 +76,7 @@ jobs:
   deploy-production:
     needs: deploy-staging
     runs-on: ubuntu-latest
-    environment: production   # 👈 有 Required reviewers / Wait timer
+    environment: production   # 👈 這裡有 Required reviewers / Wait timer
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
@@ -94,13 +86,9 @@ jobs:
       - name: Install GitHub CLI
         run: sudo apt-get update && sudo apt-get install -y gh
 
-      - name: Authenticate GitHub CLI
-        run: echo "${GITHUB_TOKEN}" | gh auth login --with-token
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Release Production Build
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ vars.BUILD_TAG }}
           NOTE: ${{ vars.RELEASE_NOTE }}
         run: |
