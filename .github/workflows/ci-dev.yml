@@ -1,12 +1,12 @@
-name: CI Dev Deployment
+name: CI/CD Deployment Pipeline
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:   # 允許手動執行，方便測試
+  workflow_dispatch:   # 允許手動觸發，方便測試
 
 permissions:
-  contents: write  # 需要建立/刪除 release
+  contents: write
 
 jobs:
   build:
@@ -46,10 +46,52 @@ jobs:
           TAG: ${{ vars.BUILD_TAG }}
           NOTE: ${{ vars.RELEASE_NOTE }}
         run: |
-          echo "Preparing release for tag $TAG ..."
-          
-          # 如果 release 已存在，先刪掉避免衝突
+          echo "Deploying Dev Release: $TAG"
           gh release delete "$TAG" -y || true
-          
-          # 建立新的 release
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
+
+  deploy-staging:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifact
+
+      - name: Install GitHub CLI
+        run: sudo apt-get update && sudo apt-get install -y gh
+
+      - name: Release Staging Build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ vars.BUILD_TAG }}
+          NOTE: ${{ vars.RELEASE_NOTE }}
+        run: |
+          echo "Deploying Staging Release: $TAG"
+          gh release delete "$TAG" -y || true
+          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
+
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: production   # 👈 production 有 Required reviewers / Wait timer
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifact
+
+      - name: Install GitHub CLI
+        run: sudo apt-get update && sudo apt-get install -y gh
+
+      - name: Release Production Build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ vars.BUILD_TAG }}
+          NOTE: ${{ vars.RELEASE_NOTE }}
+        run: |
+          echo "Deploying Production Release: $TAG"
+          gh release delete "$TAG" -y || true
+          gh release create "$TAG" build.zip --notes "$NOTE" --latest
