@@ -3,7 +3,7 @@ name: CI/CD Deployment Pipeline
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]   # 兩者皆可觸發（若只想手動，保留 workflow_dispatch 即可）
+    branches: [ main, master ]
 
 permissions:
   contents: write
@@ -14,8 +14,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 1) Build & Package
+  # 1) Build & Self-Test (避免 Run ./ 缺 input 的錯誤)
   build:
+    name: Build & Self-Test (dry-run)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,6 +33,17 @@ jobs:
           npm run build || echo "No build script, skipping..."
           zip -r build.zip .
 
+      # ✅ 正確提供 action 需要的 inputs，避免 "Input required and not supplied: GITHUB_TOKEN"
+      - name: Action self-test (dry run)
+        uses: ./
+        with:
+          GITHUB_USERNAME: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
+          DRY_RUN: true
+          EVENT_LIMIT: 5
+          OUTPUT_STYLE: MARKDOWN
+          README_PATH: README.md
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -42,6 +54,7 @@ jobs:
 
   # 2) Deploy to Staging
   deploy-staging:
+    name: Deploy to Staging
     needs: build
     runs-on: ubuntu-latest
     environment: staging
@@ -55,12 +68,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_NUMBER: ${{ github.run_number }}
-          # 若你在「staging environment」裡設定了 BUILD_TAG（且是合法 tag），就會優先使用
           BUILD_TAG_CANDIDATE: ${{ vars.BUILD_TAG }}
           RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
-          TAG_PREFIX: ${{ vars.TAG_PREFIX || 'staging' }}  # 可在環境變數覆寫前綴，預設 staging
+          TAG_PREFIX: ${{ vars.TAG_PREFIX || 'staging' }}
         run: |
-          # 選擇 tag：若 BUILD_TAG_CANDIDATE 合法（僅含 A-Za-z0-9._- 且不含 { 或 $），則使用；否則 fallback 到 staging-v<run_number>
+          # 決定 TAG：若環境變數提供合規 tag 就用；否則 fallback 為 staging-v<run_number>
           TAG="$BUILD_TAG_CANDIDATE"
           if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '{'; then
             TAG="${TAG_PREFIX}-v${RUN_NUMBER}"
@@ -69,17 +81,15 @@ jobs:
           NOTE="${RELEASE_NOTE:-Testing pre-production release}"
           echo "Deploying Staging Release: $TAG"
 
-          # 若同名 release 已存在，先刪除避免 422
           gh release delete "$TAG" -y >/dev/null 2>&1 || true
-
-          # 建立（--prerelease 標記為預發版）
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
 
-  # 3) Deploy to Production（需 Production 環境審核通過才會開始）
+  # 3) Deploy to Production（需環境審核）
   deploy-production:
+    name: Deploy to Production
     needs: deploy-staging
     runs-on: ubuntu-latest
-    environment: production
+    environment: production   # 設定 Required reviewers 後，這裡會等待核准
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
@@ -92,7 +102,7 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
           BUILD_TAG_CANDIDATE: ${{ vars.BUILD_TAG }}
           RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
-          TAG_PREFIX: ${{ vars.TAG_PREFIX || 'prod' }}  # 預設 prod
+          TAG_PREFIX: ${{ vars.TAG_PREFIX || 'prod' }}
         run: |
           TAG="$BUILD_TAG_CANDIDATE"
           if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '{'; then
