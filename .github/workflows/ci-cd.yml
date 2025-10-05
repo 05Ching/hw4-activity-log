@@ -23,14 +23,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # 共用名稱
   ARTIFACT_NAME: build-artifact
-  # 若 package.json 沒測試/靜態分析腳本，--if-present 會自動跳過
   LINT_CMD: npm run lint --if-present
   TEST_CMD: npm test --if-present
 
 jobs:
-  # 0) 版本計算：找最新 tag -> 自動 bump -> 產生 staging/prod tag
+  # 0) Versioning：只取 semver 形式的 tag (vX.Y.Z)；沒有就以 v0.0.0 起算
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
@@ -46,45 +44,47 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure at least one tag exists
+      - name: Compute next version
+        id: compute
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'patch' }}
+          NOTE_IN: ${{ github.event.inputs.note }}
         run: |
-          if ! git describe --tags --abbrev=0 >/dev/null 2>&1; then
-            echo "No tags found. Seeding v0.0.0"
-            git tag v0.0.0
+          set -euo pipefail
+
+          # 找到最新 semver 標籤（只看 vX.Y.Z）
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
+          if [ -z "${LATEST:-}" ]; then
+            LATEST="v0.0.0"
           fi
 
-      - name: Get latest tag
-        id: latest
-        run: |
-          latest=$(git describe --tags --abbrev=0)
-          echo "latest=$latest" >> $GITHUB_OUTPUT
+          # 解析版本
+          VER="${LATEST#v}"
+          IFS='.' read -r MA MI PA <<< "$VER"
 
-      - name: Bump semver
-        id: bump
-        uses: actions-ecosystem/action-bump-semver@v1
-        with:
-          current_version: ${{ steps.latest.outputs.latest }}
-          level: ${{ github.event.inputs.bump || 'patch' }}
+          case "${BUMP}" in
+            major) MA=$((MA+1)); MI=0; PA=0 ;;
+            minor) MI=$((MI+1)); PA=0 ;;
+            patch|*) PA=$((PA+1)) ;;
+          esac
 
-      - name: Compute tags / notes
-        id: compute
-        run: |
-          BASE="${{ steps.latest.outputs.latest }}"
-          NEXT="${{ steps.bump.outputs.new_version }}"
+          NEXT="v${MA}.${MI}.${PA}"
+
           STAGING="staging-${NEXT}"
           PROD="prod-${NEXT}"
-          # release note：優先用使用者輸入，其次簡單預設
-          NOTE="${{ github.event.inputs.note }}"
-          if [ -z "$NOTE" ]; then
+
+          NOTE="${NOTE_IN}"
+          if [ -z "${NOTE}" ]; then
             NOTE="Automated release ${NEXT} — CI/CD advanced pipeline."
           fi
-          echo "base_version=$BASE"     >> $GITHUB_OUTPUT
-          echo "next_version=$NEXT"     >> $GITHUB_OUTPUT
-          echo "tag_staging=$STAGING"   >> $GITHUB_OUTPUT
-          echo "tag_prod=$PROD"         >> $GITHUB_OUTPUT
-          echo "release_note=$NOTE"     >> $GITHUB_OUTPUT
 
-  # 1) Build（含 matrix、lint、test）→ 上傳 artifact
+          echo "base_version=${LATEST}"       >> "$GITHUB_OUTPUT"
+          echo "next_version=${NEXT}"         >> "$GITHUB_OUTPUT"
+          echo "tag_staging=${STAGING}"       >> "$GITHUB_OUTPUT"
+          echo "tag_prod=${PROD}"             >> "$GITHUB_OUTPUT"
+          echo "release_note=${NOTE}"         >> "$GITHUB_OUTPUT"
+
+  # 1) Build（matrix + lint + test）→ 上傳同一份 artifact
   build:
     name: Build (lint + test) — Node ${{ matrix.node }}
     needs: versioning
@@ -103,8 +103,7 @@ jobs:
           node-version: ${{ matrix.node }}
 
       - name: Install deps
-        run: |
-          npm ci || npm i
+        run: npm ci || npm i
 
       - name: Lint
         run: ${{ env.LINT_CMD }}
@@ -112,9 +111,9 @@ jobs:
       - name: Test
         run: ${{ env.TEST_CMD }}
 
-      - name: Build
+      - name: Build/Package
         run: |
-          npm run build --if-present || echo "No build script, packaging source."
+          npm run build --if-present || echo "No build script, packaging repo…"
           zip -r build.zip .
 
       - name: Upload artifact
@@ -125,16 +124,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # 2) Deploy Staging（用 environment secrets；Slack/GitHub 通知；失敗自動清理）
+  # 2) Staging：使用 environment secrets；失敗自動清理；可發 Slack 通知
   deploy-staging:
     name: Deploy to Staging
     needs: [versioning, build]
     runs-on: ubuntu-latest
     environment: staging
-    outputs:
-      tag: ${{ steps.vars.outputs.tag }}
+    env:
+      STATUS: ${{ job.status }}
     steps:
-      - name: Checkout (so gh sees .git)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Download artifact
@@ -142,23 +141,15 @@ jobs:
         with:
           name: ${{ env.ARTIFACT_NAME }}
 
-      - name: Prepare vars
-        id: vars
-        run: |
-          echo "tag=${{ needs.versioning.outputs.tag_staging }}" >> $GITHUB_OUTPUT
-          echo "note=${{ needs.versioning.outputs.release_note }}" >> $GITHUB_OUTPUT
-
       - name: Create Staging Release
-        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG:  ${{ needs.versioning.outputs.tag_staging }}
+          NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
-          TAG="${{ steps.vars.outputs.tag }}"
-          NOTE="${{ steps.vars.outputs.note }}"
-          echo "Releasing $TAG"
-          # 若已存在，先刪掉避免 422
-          gh release delete "$TAG" -y >/dev/null 2>&1 || true
           set -e
+          echo "Releasing $TAG"
+          gh release delete "$TAG" -y >/dev/null 2>&1 || true
           if ! gh release create "$TAG" build.zip --notes "$NOTE" --prerelease ; then
             echo "Release failed, cleaning up…"
             gh release delete "$TAG" -y >/dev/null 2>&1 || true
@@ -166,50 +157,44 @@ jobs:
             exit 1
           fi
 
-      - name: Notify (Slack) — optional
+      - name: Slack notify (optional)
         if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TAG:  ${{ needs.versioning.outputs.tag_staging }}
+          RESULT: ${{ job.status }}
         run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            payload=$(jq -n \
-              --arg tag "${{ steps.vars.outputs.tag }}" \
-              --arg status "${{ job.status }}" \
-              '{text: ("Staging release *\($tag)* status: \($status)")}')
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            PAYLOAD=$(printf '{"text":"Staging release *%s* status: %s"}' "$TAG" "$RESULT")
             curl -s -X POST -H 'Content-type: application/json' \
-              --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null
+              --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
           fi
 
       - name: Comment on commit/PR
         uses: actions/github-script@v7
         with:
           script: |
-            const tag = '${{ steps.vars.outputs.tag }}';
-            const status = '${{ job.status }}';
-            const note = `${{ toJson(needs.versioning.outputs.release_note) }}`;
-            const body = `✅ Staging release **${tag}** (${status})\n\n${note}`;
+            const body = `✅ Staging release **${{ needs.versioning.outputs.tag_staging }}** (${context.job})\n\n${{ toJson(needs.versioning.outputs.release_note) }}`;
             if (context.payload.pull_request) {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                body
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number, body
               });
             } else {
               await github.rest.repos.createCommitComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: context.sha,
-                body
+                owner: context.repo.owner, repo: context.repo.repo,
+                commit_sha: context.sha, body
               });
             }
 
-  # 3) Deploy Production（需環境審核；同 artifact；失敗自動回滾；通知）
+  # 3) Production：需環境審核；同 artifact；失敗自動清理；可發 Slack
   deploy-production:
     name: Deploy to Production
     needs: [versioning, deploy-staging]
     runs-on: ubuntu-latest
-    environment: production   # 環境須啟用 Required reviewers
+    environment: production
+    env:
+      STATUS: ${{ job.status }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -220,15 +205,14 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
 
       - name: Create Production Release
-        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG:  ${{ needs.versioning.outputs.tag_prod }}
+          NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
-          TAG="${{ needs.versioning.outputs.tag_prod }}"
-          NOTE="${{ needs.versioning.outputs.release_note }}"
+          set -e
           echo "Releasing $TAG"
           gh release delete "$TAG" -y >/dev/null 2>&1 || true
-          set -e
           if ! gh release create "$TAG" build.zip --notes "$NOTE" --latest ; then
             echo "Release failed, cleaning up…"
             gh release delete "$TAG" -y >/dev/null 2>&1 || true
@@ -236,40 +220,32 @@ jobs:
             exit 1
           fi
 
-      - name: Notify (Slack) — optional
+      - name: Slack notify (optional)
         if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TAG:  ${{ needs.versioning.outputs.tag_prod }}
+          RESULT: ${{ job.status }}
         run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            payload=$(jq -n \
-              --arg tag "${{ needs.versioning.outputs.tag_prod }}" \
-              --arg status "${{ job.status }}" \
-              '{text: ("Production release *\($tag)* status: \($status)")}')
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            PAYLOAD=$(printf '{"text":"Production release *%s* status: %s"}' "$TAG" "$RESULT")
             curl -s -X POST -H 'Content-type: application/json' \
-              --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null
+              --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
           fi
 
       - name: Comment on commit/PR
         uses: actions/github-script@v7
         with:
           script: |
-            const tag = '${{ needs.versioning.outputs.tag_prod }}';
-            const status = '${{ job.status }}';
-            const note = `${{ toJson(needs.versioning.outputs.release_note) }}`;
-            const body = `🚀 Production release **${tag}** (${status})\n\n${note}`;
+            const body = `🚀 Production release **${{ needs.versioning.outputs.tag_prod }}** (${context.job})\n\n${{ toJson(needs.versioning.outputs.release_note) }}`;
             if (context.payload.pull_request) {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                body
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number, body
               });
             } else {
               await github.rest.repos.createCommitComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: context.sha,
-                body
+                owner: context.repo.owner, repo: context.repo.repo,
+                commit_sha: context.sha, body
               });
             }
