@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 1) Build & Package（不再跑 uses: ./ 自我測試）
+  # 1️⃣ Build Job
   build:
     runs-on: ubuntu-latest
     steps:
@@ -40,12 +40,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # 2) Deploy to Staging
+  # 2️⃣ Deploy to Staging
   deploy-staging:
     needs: build
     runs-on: ubuntu-latest
     environment: staging
     steps:
+      # 🔹 必須先 checkout，gh 才知道 repo 是誰的
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
@@ -59,7 +63,6 @@ jobs:
           RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
           TAG_PREFIX: ${{ vars.TAG_PREFIX || 'staging' }}
         run: |
-          # 合法 tag（A-Za-z0-9._-）；否則 fallback: staging-v<run_number>
           TAG="$BUILD_TAG_CANDIDATE"
           if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '{'; then
             TAG="${TAG_PREFIX}-v${RUN_NUMBER}"
@@ -71,12 +74,15 @@ jobs:
           gh release delete "$TAG" -y >/dev/null 2>&1 || true
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
 
-  # 3) Deploy to Production（需 reviewers 核准）
+  # 3️⃣ Deploy to Production（需要環境核准）
   deploy-production:
     needs: deploy-staging
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
