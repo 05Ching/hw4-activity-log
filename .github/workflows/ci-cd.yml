@@ -28,7 +28,6 @@ env:
   TEST_CMD: npm test --if-present
 
 jobs:
-  # 0) Versioning：只取 semver 形式的 tag (vX.Y.Z)；沒有就以 v0.0.0 起算
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
@@ -51,40 +50,27 @@ jobs:
           NOTE_IN: ${{ github.event.inputs.note }}
         run: |
           set -euo pipefail
-
-          # 找到最新 semver 標籤（只看 vX.Y.Z）
           LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
           if [ -z "${LATEST:-}" ]; then
             LATEST="v0.0.0"
           fi
-
-          # 解析版本
           VER="${LATEST#v}"
           IFS='.' read -r MA MI PA <<< "$VER"
-
           case "${BUMP}" in
             major) MA=$((MA+1)); MI=0; PA=0 ;;
             minor) MI=$((MI+1)); PA=0 ;;
             patch|*) PA=$((PA+1)) ;;
           esac
-
           NEXT="v${MA}.${MI}.${PA}"
-
           STAGING="staging-${NEXT}"
           PROD="prod-${NEXT}"
-
-          NOTE="${NOTE_IN}"
-          if [ -z "${NOTE}" ]; then
-            NOTE="Automated release ${NEXT} — CI/CD advanced pipeline."
-          fi
-
+          NOTE="${NOTE_IN:-Automated release ${NEXT} — CI/CD advanced pipeline.}"
           echo "base_version=${LATEST}"       >> "$GITHUB_OUTPUT"
           echo "next_version=${NEXT}"         >> "$GITHUB_OUTPUT"
           echo "tag_staging=${STAGING}"       >> "$GITHUB_OUTPUT"
           echo "tag_prod=${PROD}"             >> "$GITHUB_OUTPUT"
           echo "release_note=${NOTE}"         >> "$GITHUB_OUTPUT"
 
-  # 1) Build（matrix + lint + test）→ 上傳同一份 artifact
   build:
     name: Build (lint + test) — Node ${{ matrix.node }}
     needs: versioning
@@ -124,14 +110,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # 2) Staging：使用 environment secrets；失敗自動清理；可發 Slack 通知
   deploy-staging:
     name: Deploy to Staging
     needs: [versioning, build]
     runs-on: ubuntu-latest
     environment: staging
-    env:
-      STATUS: ${{ job.status }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -142,6 +125,7 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
 
       - name: Create Staging Release
+        id: release_staging
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG:  ${{ needs.versioning.outputs.tag_staging }}
@@ -154,7 +138,9 @@ jobs:
             echo "Release failed, cleaning up…"
             gh release delete "$TAG" -y >/dev/null 2>&1 || true
             git tag -d "$TAG" 2>/dev/null || true
-            exit 1
+            echo "fail" > result.txt
+          else
+            echo "success" > result.txt
           fi
 
       - name: Slack notify (optional)
@@ -162,39 +148,19 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           TAG:  ${{ needs.versioning.outputs.tag_staging }}
-          RESULT: ${{ job.status }}
         run: |
           if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            RESULT=$(cat result.txt || echo "unknown")
             PAYLOAD=$(printf '{"text":"Staging release *%s* status: %s"}' "$TAG" "$RESULT")
             curl -s -X POST -H 'Content-type: application/json' \
               --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
           fi
 
-      - name: Comment on commit/PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = `✅ Staging release **${{ needs.versioning.outputs.tag_staging }}** (${context.job})\n\n${{ toJson(needs.versioning.outputs.release_note) }}`;
-            if (context.payload.pull_request) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number, body
-              });
-            } else {
-              await github.rest.repos.createCommitComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                commit_sha: context.sha, body
-              });
-            }
-
-  # 3) Production：需環境審核；同 artifact；失敗自動清理；可發 Slack
   deploy-production:
     name: Deploy to Production
     needs: [versioning, deploy-staging]
     runs-on: ubuntu-latest
     environment: production
-    env:
-      STATUS: ${{ job.status }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -205,6 +171,7 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
 
       - name: Create Production Release
+        id: release_prod
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG:  ${{ needs.versioning.outputs.tag_prod }}
@@ -217,7 +184,9 @@ jobs:
             echo "Release failed, cleaning up…"
             gh release delete "$TAG" -y >/dev/null 2>&1 || true
             git tag -d "$TAG" 2>/dev/null || true
-            exit 1
+            echo "fail" > result.txt
+          else
+            echo "success" > result.txt
           fi
 
       - name: Slack notify (optional)
@@ -225,27 +194,10 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           TAG:  ${{ needs.versioning.outputs.tag_prod }}
-          RESULT: ${{ job.status }}
         run: |
           if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            RESULT=$(cat result.txt || echo "unknown")
             PAYLOAD=$(printf '{"text":"Production release *%s* status: %s"}' "$TAG" "$RESULT")
             curl -s -X POST -H 'Content-type: application/json' \
               --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
           fi
-
-      - name: Comment on commit/PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = `🚀 Production release **${{ needs.versioning.outputs.tag_prod }}** (${context.job})\n\n${{ toJson(needs.versioning.outputs.release_note) }}`;
-            if (context.payload.pull_request) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number, body
-              });
-            } else {
-              await github.rest.repos.createCommitComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                commit_sha: context.sha, body
-              });
-            }
