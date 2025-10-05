@@ -1,83 +1,106 @@
 name: CI/CD Deployment Pipeline
 
 on:
-  push:
-    branches: [ master ]
   workflow_dispatch:
+  push:
+    branches: [ main, master ]   # 兩者皆可觸發（若只想手動，保留 workflow_dispatch 即可）
 
 permissions:
   contents: write
+  deployments: write
+
+concurrency:
+  group: release-pipeline-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # 🧱 Step 1️⃣ Build Job
+  # 1) Build & Package
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build project
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install & Build
         run: |
-          npm install || true
-          npm run build || echo "No build script found, skipping..."
+          npm ci || npm i
+          npm run build || echo "No build script, skipping..."
           zip -r build.zip .
 
-      - name: Upload build artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: build-artifact
           path: build.zip
+          if-no-files-found: error
+          retention-days: 7
 
-  # 🚀 Step 2️⃣ Deploy to Staging
+  # 2) Deploy to Staging
   deploy-staging:
     needs: build
     runs-on: ubuntu-latest
     environment: staging
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download artifact
+      - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
 
-      - name: Install GitHub CLI
-        run: sudo apt-get update && sudo apt-get install -y gh
-
-      - name: Create staging release
+      - name: Create Staging Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_TAG: ${{ vars.BUILD_TAG }}
+          RUN_NUMBER: ${{ github.run_number }}
+          # 若你在「staging environment」裡設定了 BUILD_TAG（且是合法 tag），就會優先使用
+          BUILD_TAG_CANDIDATE: ${{ vars.BUILD_TAG }}
           RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
+          TAG_PREFIX: ${{ vars.TAG_PREFIX || 'staging' }}  # 可在環境變數覆寫前綴，預設 staging
         run: |
-          echo "Deploying Staging Release: $BUILD_TAG"
-          gh release delete "$BUILD_TAG" -y || true
-          gh release create "$BUILD_TAG" build.zip --notes "$RELEASE_NOTE" --prerelease
+          # 選擇 tag：若 BUILD_TAG_CANDIDATE 合法（僅含 A-Za-z0-9._- 且不含 { 或 $），則使用；否則 fallback 到 staging-v<run_number>
+          TAG="$BUILD_TAG_CANDIDATE"
+          if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '{'; then
+            TAG="${TAG_PREFIX}-v${RUN_NUMBER}"
+          fi
 
-  # 🌍 Step 3️⃣ Deploy to Production (manual approval)
+          NOTE="${RELEASE_NOTE:-Testing pre-production release}"
+          echo "Deploying Staging Release: $TAG"
+
+          # 若同名 release 已存在，先刪除避免 422
+          gh release delete "$TAG" -y >/dev/null 2>&1 || true
+
+          # 建立（--prerelease 標記為預發版）
+          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
+
+  # 3) Deploy to Production（需 Production 環境審核通過才會開始）
   deploy-production:
     needs: deploy-staging
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download artifact
+      - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
 
-      - name: Install GitHub CLI
-        run: sudo apt-get update && sudo apt-get install -y gh
-
-      - name: Create production release
+      - name: Create Production Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_TAG: ${{ vars.BUILD_TAG }}
+          RUN_NUMBER: ${{ github.run_number }}
+          BUILD_TAG_CANDIDATE: ${{ vars.BUILD_TAG }}
           RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
+          TAG_PREFIX: ${{ vars.TAG_PREFIX || 'prod' }}  # 預設 prod
         run: |
-          echo "Deploying Production Release: $BUILD_TAG"
-          gh release delete "$BUILD_TAG" -y || true
-          gh release create "$BUILD_TAG" build.zip --notes "$RELEASE_NOTE" --latest
+          TAG="$BUILD_TAG_CANDIDATE"
+          if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '{'; then
+            TAG="${TAG_PREFIX}-v${RUN_NUMBER}"
+          fi
+
+          NOTE="${RELEASE_NOTE:-Production release}"
+          echo "Deploying Production Release: $TAG"
+
+          gh release delete "$TAG" -y >/dev/null 2>&1 || true
+          gh release create "$TAG" build.zip --notes "$NOTE" --latest
