@@ -9,59 +9,35 @@ permissions:
   contents: write
 
 jobs:
+  # Step 1️⃣ Build Job
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build
+      - name: Build project
         run: |
           npm install || true
-          npm run build || echo "no build script, skipping..."
+          npm run build || echo "No build script found, skipping..."
           zip -r build.zip .
 
-      - name: Upload Artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: build-artifact
           path: build.zip
 
-  deploy-dev:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: dev
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifact
-
-      - name: Install GitHub CLI
-        run: sudo apt-get update && sudo apt-get install -y gh
-
-      - name: Release Dev Build
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="dev-v${{ github.run_number }}"
-          NOTE="Dev test build"
-          echo "Deploying Dev Release: $TAG"
-          gh release delete "$TAG" -y || true
-          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
-
+  # Step 2️⃣ Deploy to Staging
   deploy-staging:
-    needs: deploy-dev
+    needs: build
     runs-on: ubuntu-latest
     environment: staging
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
@@ -69,7 +45,7 @@ jobs:
       - name: Install GitHub CLI
         run: sudo apt-get update && sudo apt-get install -y gh
 
-      - name: Release Staging Build
+      - name: Create staging release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -79,15 +55,16 @@ jobs:
           gh release delete "$TAG" -y || true
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
 
+  # Step 3️⃣ Deploy to Production (manual approval required)
   deploy-production:
     needs: deploy-staging
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
@@ -95,7 +72,7 @@ jobs:
       - name: Install GitHub CLI
         run: sudo apt-get update && sudo apt-get install -y gh
 
-      - name: Release Production Build
+      - name: Create production release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
