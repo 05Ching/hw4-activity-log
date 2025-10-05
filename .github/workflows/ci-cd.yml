@@ -6,7 +6,7 @@ on:
     branches: [ main, master ]
 
 permissions:
-  contents: write
+  contents: write       # 建立/刪除 Releases 需要
   deployments: write
 
 concurrency:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 1) Build & Self-Test (避免 Run ./ 缺 input 的錯誤)
+  # 1) Build & Self-Test（確保 uses: ./ 執行時有必要 inputs）
   build:
     name: Build & Self-Test (dry-run)
     runs-on: ubuntu-latest
@@ -33,12 +33,12 @@ jobs:
           npm run build || echo "No build script, skipping..."
           zip -r build.zip .
 
-      # ✅ 正確提供 action 需要的 inputs，避免 "Input required and not supplied: GITHUB_TOKEN"
+      # ✅ 重點：只用內建的 GITHUB_TOKEN；避免 "Input required and not supplied: GITHUB_TOKEN"
       - name: Action self-test (dry run)
         uses: ./
         with:
           GITHUB_USERNAME: ${{ github.repository_owner }}
-          GITHUB_TOKEN: ${{ secrets.TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: true
           EVENT_LIMIT: 5
           OUTPUT_STYLE: MARKDOWN
@@ -72,7 +72,7 @@ jobs:
           RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
           TAG_PREFIX: ${{ vars.TAG_PREFIX || 'staging' }}
         run: |
-          # 決定 TAG：若環境變數提供合規 tag 就用；否則 fallback 為 staging-v<run_number>
+          # 只接受合法 tag；不合規就用 staging-v<run_number>
           TAG="$BUILD_TAG_CANDIDATE"
           if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '{'; then
             TAG="${TAG_PREFIX}-v${RUN_NUMBER}"
@@ -89,7 +89,7 @@ jobs:
     name: Deploy to Production
     needs: deploy-staging
     runs-on: ubuntu-latest
-    environment: production   # 設定 Required reviewers 後，這裡會等待核准
+    environment: production   # 要在 Settings→Environments→production 設 Required reviewers
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
