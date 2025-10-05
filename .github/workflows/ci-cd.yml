@@ -28,6 +28,7 @@ env:
   TEST_CMD: npm test --if-present
 
 jobs:
+  # 0) Versioning：僅取 vX.Y.Z 的 tag，自動 bump
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
@@ -71,6 +72,7 @@ jobs:
           echo "tag_prod=${PROD}"             >> "$GITHUB_OUTPUT"
           echo "release_note=${NOTE}"         >> "$GITHUB_OUTPUT"
 
+  # 1) Build（matrix 兩版 Node）→ 只讓 Node 20 上傳 artifact，避免 409 衝突
   build:
     name: Build (lint + test) — Node ${{ matrix.node }}
     needs: versioning
@@ -102,14 +104,18 @@ jobs:
           npm run build --if-present || echo "No build script, packaging repo…"
           zip -r build.zip .
 
-      - name: Upload artifact
+      # ✅ 關鍵修正：只在 Node 20 這條 lane 上傳，同名就不會 409
+      - name: Upload artifact (only once on Node 20)
+        if: ${{ matrix.node == 20 }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: build.zip
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
+  # 2) Staging：失敗自動清理；可用 environment secret 發 Slack
   deploy-staging:
     name: Deploy to Staging
     needs: [versioning, build]
@@ -139,6 +145,7 @@ jobs:
             gh release delete "$TAG" -y >/dev/null 2>&1 || true
             git tag -d "$TAG" 2>/dev/null || true
             echo "fail" > result.txt
+            exit 1
           else
             echo "success" > result.txt
           fi
@@ -152,10 +159,10 @@ jobs:
           if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
             RESULT=$(cat result.txt || echo "unknown")
             PAYLOAD=$(printf '{"text":"Staging release *%s* status: %s"}' "$TAG" "$RESULT")
-            curl -s -X POST -H 'Content-type: application/json' \
-              --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
+            curl -s -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
           fi
 
+  # 3) Production：需環境審核；失敗自動清理；同樣可發 Slack
   deploy-production:
     name: Deploy to Production
     needs: [versioning, deploy-staging]
@@ -185,6 +192,7 @@ jobs:
             gh release delete "$TAG" -y >/dev/null 2>&1 || true
             git tag -d "$TAG" 2>/dev/null || true
             echo "fail" > result.txt
+            exit 1
           else
             echo "success" > result.txt
           fi
@@ -198,6 +206,5 @@ jobs:
           if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
             RESULT=$(cat result.txt || echo "unknown")
             PAYLOAD=$(printf '{"text":"Production release *%s* status: %s"}' "$TAG" "$RESULT")
-            curl -s -X POST -H 'Content-type: application/json' \
-              --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
+            curl -s -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
           fi
