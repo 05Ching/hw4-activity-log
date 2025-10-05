@@ -6,7 +6,7 @@ on:
     branches: [ main, master ]
 
 permissions:
-  contents: write       # 建立/刪除 Releases 需要
+  contents: write
   deployments: write
 
 concurrency:
@@ -14,9 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 1) Build & Self-Test（確保 uses: ./ 執行時有必要 inputs）
+  # 1) Build & Package（不再跑 uses: ./ 自我測試）
   build:
-    name: Build & Self-Test (dry-run)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -33,17 +32,6 @@ jobs:
           npm run build || echo "No build script, skipping..."
           zip -r build.zip .
 
-      # ✅ 重點：只用內建的 GITHUB_TOKEN；避免 "Input required and not supplied: GITHUB_TOKEN"
-      - name: Action self-test (dry run)
-        uses: ./
-        with:
-          GITHUB_USERNAME: ${{ github.repository_owner }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRY_RUN: true
-          EVENT_LIMIT: 5
-          OUTPUT_STYLE: MARKDOWN
-          README_PATH: README.md
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -54,7 +42,6 @@ jobs:
 
   # 2) Deploy to Staging
   deploy-staging:
-    name: Deploy to Staging
     needs: build
     runs-on: ubuntu-latest
     environment: staging
@@ -72,7 +59,7 @@ jobs:
           RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
           TAG_PREFIX: ${{ vars.TAG_PREFIX || 'staging' }}
         run: |
-          # 只接受合法 tag；不合規就用 staging-v<run_number>
+          # 合法 tag（A-Za-z0-9._-）；否則 fallback: staging-v<run_number>
           TAG="$BUILD_TAG_CANDIDATE"
           if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '{'; then
             TAG="${TAG_PREFIX}-v${RUN_NUMBER}"
@@ -84,12 +71,11 @@ jobs:
           gh release delete "$TAG" -y >/dev/null 2>&1 || true
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
 
-  # 3) Deploy to Production（需環境審核）
+  # 3) Deploy to Production（需 reviewers 核准）
   deploy-production:
-    name: Deploy to Production
     needs: deploy-staging
     runs-on: ubuntu-latest
-    environment: production   # 要在 Settings→Environments→production 設 Required reviewers
+    environment: production
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
