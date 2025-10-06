@@ -1,143 +1,215 @@
 name: CI/CD Pipeline — Outstanding (O Grade)
 
 on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Semver bump type (major|minor|patch)'
+        required: true
+        default: 'patch'
+      note:
+        description: 'Release notes override (optional)'
+        required: false
   push:
     branches: [ main, master ]
-  workflow_dispatch:
 
 permissions:
   contents: write
   deployments: write
+  pull-requests: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: advanced-cicd-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  ARTIFACT_NAME: build-artifact
+  LINT_CMD: npm run lint --if-present
+  TEST_CMD: npm test --if-present
+
 jobs:
-  # 🧩 1️⃣ Auto Versioning
+  # 0) Versioning：僅取 vX.Y.Z 標籤，沒有就從 v0.0.0 起算，依 bump 自動 +1
   versioning:
+    name: Versioning (auto-bump)
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.bump.outputs.new_version }}
+      base_version: ${{ steps.compute.outputs.base_version }}
+      next_version: ${{ steps.compute.outputs.next_version }}
+      tag_staging:  ${{ steps.compute.outputs.tag_staging }}
+      tag_prod:     ${{ steps.compute.outputs.tag_prod }}
+      release_note: ${{ steps.compute.outputs.release_note }}
     steps:
       - name: Checkout (full history for tags)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Get Latest Tag
-        id: bump
+      - name: Compute next version
+        id: compute
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'patch' }}
+          NOTE_IN: ${{ github.event.inputs.note }}
         run: |
-          git fetch --tags
-          LATEST=$(git tag -l "v*" | sort -V | tail -n1)
-          if [ -z "$LATEST" ]; then
-            LATEST="v1.0.0"
+          set -euo pipefail
+          # 只找符合 vX.Y.Z 的 tag；沒有就種 v0.0.0
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
+          if [ -z "${LATEST:-}" ]; then
+            LATEST="v0.0.0"
           fi
-          echo "Latest version: $LATEST"
-          NEW=$(echo "$LATEST" | awk -F. -v OFS=. '{$NF++; print}')
-          echo "New version: $NEW"
-          echo "new_version=$NEW" >> $GITHUB_OUTPUT
 
-  # 🧱 2️⃣ Build + Lint + Test (Matrix Node)
+          VER="${LATEST#v}"
+          IFS='.' read -r MA MI PA <<< "$VER"
+
+          case "${BUMP}" in
+            major) MA=$((MA+1)); MI=0; PA=0 ;;
+            minor) MI=$((MI+1)); PA=0 ;;
+            patch|*) PA=$((PA+1)) ;;
+          esac
+
+          NEXT="v${MA}.${MI}.${PA}"
+          STAGING="staging-${NEXT}"
+          PROD="prod-${NEXT}"
+          NOTE="${NOTE_IN:-Automated release ${NEXT} — CI/CD advanced pipeline.}"
+
+          echo "base_version=${LATEST}"       >> "$GITHUB_OUTPUT"
+          echo "next_version=${NEXT}"         >> "$GITHUB_OUTPUT"
+          echo "tag_staging=${STAGING}"       >> "$GITHUB_OUTPUT"
+          echo "tag_prod=${PROD}"             >> "$GITHUB_OUTPUT"
+          echo "release_note=${NOTE}"         >> "$GITHUB_OUTPUT"
+
+  # 1) Build（Matrix：Node 18 & 20）→ 只讓 Node 20 上傳 artifact，避免 409 衝突
   build:
+    name: Build (lint + test) — Node ${{ matrix.node }}
     needs: versioning
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node: [18, 20]
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node ${{ matrix.node }}
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
 
-      - name: Install dependencies
-        run: npm ci || npm install
+      - name: Install deps
+        run: npm ci || npm i
 
-      - name: Run lint and tests
-        run: |
-          npm run lint --if-present
-          npm test --if-present
+      - name: Lint
+        run: ${{ env.LINT_CMD }}
 
-      - name: Build project
+      - name: Test
+        run: ${{ env.TEST_CMD }}
+
+      - name: Build/Package
         run: |
-          npm run build || echo "No build script found."
+          npm run build --if-present || echo "No build script, packaging repo…"
           zip -r build.zip .
 
-      - name: Upload artifact
+      # ✅ 關鍵：只在 Node 20 這條 lane 上傳，避免名稱衝突 409
+      - name: Upload artifact (Node 20 only)
+        if: ${{ matrix.node == 20 }}
         uses: actions/upload-artifact@v4
         with:
-          name: build-artifact
+          name: ${{ env.ARTIFACT_NAME }}
           path: build.zip
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
-  # 🚀 3️⃣ Deploy to Staging
+  # 2) Staging：同一份 artifact；發版失敗自動清理；可用 environment secret 發 Slack 通知
   deploy-staging:
-    needs: build
+    name: Deploy to Staging
+    needs: [versioning, build]
     runs-on: ubuntu-latest
     environment: staging
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-artifact
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Create staging release
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+
+      - name: Create Staging Release
+        id: release_staging
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: staging-${{ needs.versioning.outputs.version }}
-          NOTE: "Testing pre-production release"
+          TAG:  ${{ needs.versioning.outputs.tag_staging }}
+          NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
-          echo "Deploying staging: $TAG"
-          gh release delete "$TAG" -y || true
-          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
-
-      - name: Notify Slack (staging)
-        if: always()
-        run: |
-          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
-            curl -X POST -H 'Content-type: application/json' \
-              --data "{\"text\":\"🧪 *Staging deployed:* $TAG\"}" \
-              ${{ secrets.SLACK_WEBHOOK_URL }}
+          set -e
+          echo "Releasing $TAG"
+          gh release delete "$TAG" -y >/dev/null 2>&1 || true
+          if ! gh release create "$TAG" build.zip --notes "$NOTE" --prerelease ; then
+            echo "Release failed, cleaning up…"
+            gh release delete "$TAG" -y >/dev/null 2>&1 || true
+            git tag -d "$TAG" 2>/dev/null || true
+            echo "fail" > result.txt
+            exit 1
+          else
+            echo "success" > result.txt
           fi
 
-  # 🌍 4️⃣ Deploy to Production
+      - name: Slack notify (optional)
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TAG:  ${{ needs.versioning.outputs.tag_staging }}
+        run: |
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            RESULT=$(cat result.txt || echo "unknown")
+            PAYLOAD=$(printf '{"text":"Staging release *%s* status: %s"}' "$TAG" "$RESULT")
+            curl -s -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
+          fi
+
+  # 3) Production：需 reviewers 核准；同一份 artifact；失敗自動清理；可發 Slack 通知
   deploy-production:
-    needs: deploy-staging
+    name: Deploy to Production
+    needs: [versioning, deploy-staging]
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-artifact
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Create production release
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+
+      - name: Create Production Release
+        id: release_prod
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: prod-${{ needs.versioning.outputs.version }}
-          NOTE: "Production release version ${{ needs.versioning.outputs.version }}"
+          TAG:  ${{ needs.versioning.outputs.tag_prod }}
+          NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
-          echo "Deploying production: $TAG"
-          gh release delete "$TAG" -y || true
-          set +e
-          gh release create "$TAG" build.zip --notes "$NOTE" --latest
-          STATUS=$?
-          if [ $STATUS -ne 0 ]; then
-            echo "⚠️ Release failed — performing rollback"
-            gh release delete "$TAG" -y || true
+          set -e
+          echo "Releasing $TAG"
+          gh release delete "$TAG" -y >/dev/null 2>&1 || true
+          if ! gh release create "$TAG" build.zip --notes "$NOTE" --latest ; then
+            echo "Release failed, cleaning up…"
+            gh release delete "$TAG" -y >/dev/null 2>&1 || true
+            git tag -d "$TAG" 2>/dev/null || true
+            echo "fail" > result.txt
             exit 1
+          else
+            echo "success" > result.txt
           fi
 
-      - name: Notify Slack (production)
+      - name: Slack notify (optional)
         if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TAG:  ${{ needs.versioning.outputs.tag_prod }}
         run: |
-          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
-            curl -X POST -H 'Content-type: application/json' \
-              --data "{\"text\":\"🚀 *Production deployed:* $TAG (status: ${{ job.status }})\"}" \
-              ${{ secrets.SLACK_WEBHOOK_URL }}
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            RESULT=$(cat result.txt || echo "unknown")
+            PAYLOAD=$(printf '{"text":"Production release *%s* status: %s"}' "$TAG" "$RESULT")
+            curl -s -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
           fi
