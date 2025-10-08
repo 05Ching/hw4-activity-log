@@ -1,4 +1,4 @@
-name: CI/CD Pipeline — Automated Testing (A Grade)
+name: CI/CD Pipeline — Automated Testing (Simulated Failure)
 
 on:
   workflow_dispatch:
@@ -18,9 +18,8 @@ permissions:
   deployments: write
   pull-requests: write
 
-# 避免重複執行：新的 run 會自動取消舊的
 concurrency:
-  group: automated-testing-${{ github.ref }}
+  group: automated-testing-failure-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -29,7 +28,7 @@ env:
   TEST_CMD: npm test --if-present
 
 jobs:
-  # 1️⃣ Versioning：自動 bump 版本號與 tag
+  # 1️⃣ 自動版本號
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
@@ -56,7 +55,6 @@ jobs:
           if [ -z "${LATEST:-}" ]; then
             LATEST="v0.0.0"
           fi
-
           VER="${LATEST#v}"
           IFS='.' read -r MA MI PA <<< "$VER"
           case "${BUMP}" in
@@ -68,7 +66,7 @@ jobs:
           NEXT="v${MA}.${MI}.${PA}"
           STAGING="staging-${NEXT}"
           PROD="prod-${NEXT}"
-          NOTE="${NOTE_IN:-Automated release ${NEXT} — CI/CD with automated testing.}"
+          NOTE="${NOTE_IN:-Automated release ${NEXT} — simulated test failure demo.}"
 
           echo "base_version=${LATEST}"       >> "$GITHUB_OUTPUT"
           echo "next_version=${NEXT}"         >> "$GITHUB_OUTPUT"
@@ -76,7 +74,7 @@ jobs:
           echo "tag_prod=${PROD}"             >> "$GITHUB_OUTPUT"
           echo "release_note=${NOTE}"         >> "$GITHUB_OUTPUT"
 
-  # 2️⃣ Build Job：建置 + 上傳 artifact
+  # 2️⃣ Build Job
   build:
     name: Build — Node ${{ matrix.node }}
     needs: versioning
@@ -108,7 +106,6 @@ jobs:
       - name: Package build output
         run: zip -r build.zip .
 
-      # 僅 Node 20 上傳，避免重複
       - name: Upload artifact (Node 20 only)
         if: ${{ matrix.node == 20 }}
         uses: actions/upload-artifact@v4
@@ -118,9 +115,9 @@ jobs:
           retention-days: 7
           overwrite: true
 
-  # 3️⃣ Test Job：自動化測試階段
+  # 3️⃣ ❌ 測試階段：模擬失敗
   test:
-    name: Automated Tests
+    name: Automated Tests (Simulated Failure)
     runs-on: ubuntu-latest
     needs: build
     steps:
@@ -137,12 +134,13 @@ jobs:
         with:
           node-version: 20
 
-      - name: Run Automated Tests
+      - name: Run Automated Tests (Simulated Failure)
         run: |
-          echo "🧪 Running automated tests..."
-          ${{ env.TEST_CMD }} || (echo "❌ Tests failed!" && exit 1)
+          echo "🧪 Running simulated test..."
+          echo "❌ Mock test failed intentionally!"
+          exit 1   # 強制測試失敗
 
-  # 4️⃣ Deploy to Staging：只有測試成功才會部署
+  # 4️⃣ Deploy to Staging（測試失敗 → 不執行）
   deploy-staging:
     name: Deploy to Staging
     needs: [versioning, test]
@@ -151,26 +149,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-
       - name: Create Staging Release
-        id: release_staging
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG:  ${{ needs.versioning.outputs.tag_staging }}
           NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
-          set -e
-          echo "🚀 Releasing $TAG to staging..."
-          gh release delete "$TAG" -y >/dev/null 2>&1 || true
-          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
-          echo "✅ Staging release created successfully."
+          echo "🚀 Should not reach here — tests failed, this should be skipped."
 
-  # 5️⃣ Deploy to Production：手動核准後才可部署
+  # 5️⃣ Deploy to Production（一樣會被 skipped）
   deploy-production:
     name: Deploy to Production
     needs: [versioning, deploy-staging]
@@ -179,21 +170,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-
       - name: Create Production Release
-        id: release_prod
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG:  ${{ needs.versioning.outputs.tag_prod }}
           NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
-          set -e
-          echo "🚀 Releasing $TAG to production..."
-          gh release delete "$TAG" -y >/dev/null 2>&1 || true
-          gh release create "$TAG" build.zip --notes "$NOTE" --latest
-          echo "✅ Production release created successfully."
+          echo "🚀 Should not reach here — skipped because tests failed."
