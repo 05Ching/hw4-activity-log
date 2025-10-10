@@ -1,4 +1,4 @@
-name: CI/CD Pipeline — Automated Testing (O Grade Final with Slack Notify)
+name: CI/CD Pipeline — Automated Testing (O Grade Final Stable with Slack)
 
 on:
   push:
@@ -19,7 +19,7 @@ env:
   COVERAGE_THRESHOLD: 70
 
 jobs:
-  # 1️⃣ Version bump
+  # 1️⃣ Auto version bump
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
@@ -58,7 +58,7 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: .
 
-  # 3️⃣ Unit tests + coverage
+  # 3️⃣ Unit Tests + Coverage
   test-unit:
     name: Unit Tests + Coverage
     needs: build
@@ -71,12 +71,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
       - name: Run Jest tests with coverage (mock-safe)
         run: |
           echo "🧪 Running Jest with coverage..."
           mkdir -p coverage
           echo '{"coverage": "85%"}' > coverage/coverage-summary.json
           echo "<testsuite><testcase name='mock test'/></testsuite>" > junit.xml
+
       - name: Upload Coverage Report
         uses: actions/upload-artifact@v4
         with:
@@ -88,26 +90,22 @@ jobs:
           name: junit-report
           path: junit.xml
 
-      # ✅ Slack notification
-      - name: 📢 Notify test result to Slack
+      # ✅ Slack notification (safe, no jq)
+      - name: 📢 Notify Unit Test Result to Slack
         if: always()
         run: |
           STATUS="${{ job.status }}"
           if [ "$STATUS" == "success" ]; then
-            COLOR="good"
             MESSAGE="✅ Unit Tests passed successfully in ${{ github.repository }}!"
           else
-            COLOR="danger"
             MESSAGE="❌ Unit Tests failed in ${{ github.repository }}!"
           fi
-          payload=$(jq -n \
-            --arg text "$MESSAGE" \
-            '{attachments:[{color:($text|test("✅")? "good":"danger"), text:$text}]}')
+          echo "{\"text\": \"$MESSAGE\"}" > payload.json
           curl -X POST -H 'Content-type: application/json' \
-            --data "$payload" \
+            --data @payload.json \
             ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  # 4️⃣ Integration tests
+  # 4️⃣ Integration Tests
   test-integration:
     name: Integration Tests
     needs: test-unit
@@ -116,18 +114,22 @@ jobs:
       - run: echo "🔗 Running integration tests (mock)..."
       - run: echo "✅ Integration tests passed."
 
-      # ✅ Slack notification
-      - name: 📢 Notify integration test to Slack
+      # ✅ Slack notification (safe)
+      - name: 📢 Notify Integration Test Result to Slack
         if: always()
         run: |
           STATUS="${{ job.status }}"
-          MESSAGE=$([ "$STATUS" == "success" ] && echo "✅ Integration Tests passed." || echo "❌ Integration Tests failed.")
-          payload=$(jq -n --arg text "$MESSAGE" '{text:$text}')
+          if [ "$STATUS" == "success" ]; then
+            MESSAGE="✅ Integration Tests passed successfully in ${{ github.repository }}!"
+          else
+            MESSAGE="❌ Integration Tests failed in ${{ github.repository }}!"
+          fi
+          echo "{\"text\": \"$MESSAGE\"}" > payload.json
           curl -X POST -H 'Content-type: application/json' \
-            --data "$payload" \
+            --data @payload.json \
             ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  # 5️⃣ Deploy to staging
+  # 5️⃣ Deploy to Staging
   deploy-staging:
     name: Deploy to Staging
     needs: test-integration
@@ -139,14 +141,17 @@ jobs:
           TAG="staging-$(date +%Y%m%d%H%M%S)"
           NOTE="Automated release ${TAG} — CI/CD O-grade pipeline."
           gh release create "$TAG" . --notes "$NOTE" --prerelease
+          echo "✅ Staging release created: $TAG"
+
       - name: 📢 Notify Slack (staging deploy)
         run: |
-          payload=$(jq -n --arg text "🚀 Staging release deployed successfully!" '{text:$text}')
+          MESSAGE="🚀 Staging release deployed successfully for ${{ github.repository }}!"
+          echo "{\"text\": \"$MESSAGE\"}" > payload.json
           curl -X POST -H 'Content-type: application/json' \
-            --data "$payload" \
+            --data @payload.json \
             ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  # 6️⃣ Deploy to production
+  # 6️⃣ Deploy to Production
   deploy-production:
     name: Deploy to Production
     needs: deploy-staging
@@ -158,9 +163,12 @@ jobs:
           TAG="prod-$(date +%Y%m%d%H%M%S)"
           NOTE="Production release ${TAG} — CI/CD O-grade pipeline."
           gh release create "$TAG" . --notes "$NOTE" --latest
+          echo "✅ Production release created: $TAG"
+
       - name: 📢 Notify Slack (production deploy)
         run: |
-          payload=$(jq -n --arg text "🎉 Production release successfully created!" '{text:$text}')
+          MESSAGE="🎉 Production release successfully created for ${{ github.repository }}!"
+          echo "{\"text\": \"$MESSAGE\"}" > payload.json
           curl -X POST -H 'Content-type: application/json' \
-            --data "$payload" \
+            --data @payload.json \
             ${{ secrets.SLACK_WEBHOOK_URL }}
