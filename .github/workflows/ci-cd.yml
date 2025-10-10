@@ -18,7 +18,7 @@ env:
   ARTIFACT_NAME: build-artifact
   LINT_CMD: npm run lint --if-present
   TEST_CMD: npm test --if-present
-  COVERAGE_THRESHOLD: 70  # ✅ 自訂覆蓋率下限 %
+  COVERAGE_THRESHOLD: 70  # ✅ 覆蓋率下限 %
 
 jobs:
   # 1️⃣ Versioning
@@ -27,12 +27,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       next_version: ${{ steps.compute.outputs.next_version }}
-      tag_staging:  ${{ steps.compute.outputs.tag_staging }}
-      tag_prod:     ${{ steps.compute.outputs.tag_prod }}
+      tag_staging: ${{ steps.compute.outputs.tag_staging }}
+      tag_prod: ${{ steps.compute.outputs.tag_prod }}
       release_note: ${{ steps.compute.outputs.release_note }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+
       - name: Compute next version
         id: compute
         run: |
@@ -58,14 +60,28 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: ${{ matrix.node }} }
-      - run: npm ci || npm install
-      - run: ${{ env.LINT_CMD }}
-      - run: npm run build --if-present || echo "No build step"
-      - run: zip -r build.zip .
-      - uses: actions/upload-artifact@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Lint
+        run: ${{ env.LINT_CMD }}
+
+      - name: Build project
+        run: |
+          echo "🏗️ Building project..."
+          npm run build --if-present || echo "No build step"
+
+      - name: Package build output
+        run: zip -r build.zip .
+
+      - name: Upload artifact (Node 20 / Ubuntu only)
         if: ${{ matrix.node == 20 && matrix.os == 'ubuntu-latest' }}
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: build.zip
@@ -80,10 +96,14 @@ jobs:
       TEST_ENV: dev
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
-        with: { name: ${{ env.ARTIFACT_NAME }} }
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+        with:
+          node-version: 20
 
       - name: Run Tests with Coverage
         run: |
@@ -115,9 +135,11 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          MSG="❌ Unit tests or coverage failed in ${TEST_ENV} (${COVERAGE}%)."
-          curl -s -X POST -H 'Content-type: application/json' \
-            --data "{\"text\":\"${MSG}\"}" "$SLACK_WEBHOOK_URL" >/dev/null
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            MSG="❌ Unit tests or coverage failed in ${TEST_ENV} (${COVERAGE}%)."
+            curl -s -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"${MSG}\"}" "$SLACK_WEBHOOK_URL" >/dev/null
+          fi
 
       - name: Create GitHub Issue on Failure
         if: failure()
@@ -131,17 +153,24 @@ jobs:
   test-integration:
     name: Integration Tests
     needs: test-unit
-    if: ${{ needs.test-unit.outputs.pass != 'false' }}   # ✅ 條件邏輯：覆蓋率太低則跳過
+    if: ${{ needs.test-unit.outputs.pass != 'false' }}   # ✅ 若覆蓋率低則跳過
     runs-on: ubuntu-latest
     env:
       TEST_ENV: staging
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
-        with: { name: ${{ env.ARTIFACT_NAME }} }
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: echo "🔗 Integration tests in $TEST_ENV passed!"
+        with:
+          node-version: 20
+
+      - name: Run Integration Tests
+        run: |
+          echo "🔗 Integration tests in $TEST_ENV passed!"
 
   # 5️⃣ Deploy to Staging（需測試通過）
   deploy-staging:
@@ -152,12 +181,19 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
-        with: { name: ${{ env.ARTIFACT_NAME }} }
-      - run: |
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+
+      - name: Create Staging Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.versioning.outputs.tag_staging }}
+          NOTE: ${{ needs.versioning.outputs.release_note }}
+        run: |
           echo "🚀 Staging release after successful tests."
-          gh release create "staging-${{ needs.versioning.outputs.next_version }}" build.zip \
-            --notes "${{ needs.versioning.outputs.release_note }}" --prerelease
+          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
 
   # 6️⃣ Deploy to Production（需人工核准）
   deploy-production:
@@ -167,10 +203,17 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { name: ${{ env.ARTIFACT_NAME }} }
-      - run: |
-          echo "🚀 Production release (manual approval)."
-          gh release create "prod-${{ needs.versioning.outputs.next_version }}" build.zip \
-            --notes "${{ needs.versioning.outputs.release_note }}" --latest
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+
+      - name: Create Production Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.versioning.outputs.tag_prod }}
+          NOTE: ${{ needs.versioning.outputs.release_note }}
+        run: |
+          echo "🚀 Production release (manual approval)."
+          gh release delete "$TAG" -y >/dev/null 2>&1 || true
+          gh release create "$TAG" build.zip --notes "$NOTE" --latest
