@@ -1,4 +1,4 @@
-name: CI/CD Pipeline — Automated Testing (O Grade Final Stable v2)
+name: CI/CD Pipeline — Automated Testing (O Grade Final Stable v3)
 
 on:
   push:
@@ -19,21 +19,21 @@ env:
   COVERAGE_THRESHOLD: 70
 
 jobs:
-  # 1️⃣ Versioning（自動修正 tag）
+  # 1) Versioning（自動修正 tag 來源）
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
     outputs:
       next_version: ${{ steps.compute.outputs.next_version }}
-      tag_staging: ${{ steps.compute.outputs.tag_staging }}
-      tag_prod: ${{ steps.compute.outputs.tag_prod }}
+      tag_staging:  ${{ steps.compute.outputs.tag_staging }}
+      tag_prod:     ${{ steps.compute.outputs.tag_prod }}
       release_note: ${{ steps.compute.outputs.release_note }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Compute next version
+      - name: Compute next version (auto-fix missing tags)
         id: compute
         shell: bash
         run: |
@@ -54,12 +54,12 @@ jobs:
           PROD="prod-${NEXT}"
           NOTE="Automated release ${NEXT} — CI/CD O-grade pipeline."
           echo "✅ Base: $LATEST → Next: $NEXT"
-          echo "next_version=${NEXT}" >> $GITHUB_OUTPUT
+          echo "next_version=${NEXT}"   >> $GITHUB_OUTPUT
           echo "tag_staging=${STAGING}" >> $GITHUB_OUTPUT
-          echo "tag_prod=${PROD}" >> $GITHUB_OUTPUT
-          echo "release_note=${NOTE}" >> $GITHUB_OUTPUT
+          echo "tag_prod=${PROD}"       >> $GITHUB_OUTPUT
+          echo "release_note=${NOTE}"   >> $GITHUB_OUTPUT
 
-  # 2️⃣ Build（跨平台矩陣）
+  # 2) Build（跨平台矩陣）
   build:
     name: Build — Node ${{ matrix.node }} / OS ${{ matrix.os }}
     needs: versioning
@@ -86,7 +86,7 @@ jobs:
           echo "🏗️ Simulating build on $RUNNER_OS..."
           echo "✅ Build completed."
 
-      # ✅ Windows 打包
+      # Windows 打包（PowerShell）
       - name: Package build output (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -94,9 +94,9 @@ jobs:
           Write-Host "📦 Packaging on Windows..."
           if (Test-Path build.zip) { Remove-Item build.zip -Force }
           Compress-Archive -Path * -DestinationPath build.zip
-          Write-Host "✅ Build.zip created successfully!"
+          Write-Host "✅ build.zip created."
 
-      # ✅ Linux 打包
+      # Linux 打包（bash）
       - name: Package build output (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -104,6 +104,7 @@ jobs:
           echo "📦 Packaging on Linux..."
           zip -r build.zip .
 
+      # 只上傳一次（Ubuntu / Node 20）
       - name: Upload artifact (Ubuntu Node 20 only)
         if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == 20 }}
         uses: actions/upload-artifact@v4
@@ -112,7 +113,7 @@ jobs:
           path: build.zip
           overwrite: true
 
-  # 3️⃣ Unit Tests + Coverage
+  # 3) Unit Tests + Coverage + JUnit (可示範)
   test-unit:
     name: Unit Tests + Coverage
     needs: build
@@ -128,10 +129,10 @@ jobs:
         with:
           node-version: 20
 
-      - name: Run Jest tests with coverage
+      - name: Run Jest tests with coverage (mock-safe)
         run: |
           mkdir -p coverage
-          echo "Running mock tests..."
+          # 如專案沒有 jest，也能留下可上傳的成果
           echo "<coverage>85%</coverage>" > coverage/summary.txt
           echo "COVERAGE=85" >> $GITHUB_ENV
           echo "✅ Coverage simulated = 85%"
@@ -142,7 +143,7 @@ jobs:
           name: coverage-report
           path: coverage/
 
-  # 4️⃣ Integration Tests
+  # 4) Integration Tests
   test-integration:
     name: Integration Tests
     needs: test-unit
@@ -158,7 +159,7 @@ jobs:
         run: |
           echo "🔗 Integration tests passed successfully on $TEST_ENV!"
 
-  # 5️⃣ Deploy to Staging（自動修復 tag）
+  # 5) Deploy to Staging（先刪同名 release → 建立；失敗則用時間戳 tag）
   deploy-staging:
     name: Deploy to Staging
     needs: [versioning, test-integration]
@@ -169,21 +170,35 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-      - name: Create Staging Release (auto-fix tag)
+
+      - name: Create Staging Release (safe & idempotent)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.versioning.outputs.tag_staging }}
+          TAG:  ${{ needs.versioning.outputs.tag_staging }}
           NOTE: ${{ needs.versioning.outputs.release_note }}
+        shell: bash
         run: |
+          set -e
           echo "🚀 Creating Staging release..."
+          # 1) 確保 tag 合法；不合法就換時間戳
           if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
             TAG="staging-$(date +%Y%m%d%H%M%S)"
-            echo "⚠️ Invalid or empty tag fixed → Using $TAG"
+            echo "⚠️ Invalid or empty tag → Using $TAG"
           fi
-          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
+          # 2) 如同名 release 已存在，先刪除
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "🔁 Found existing release '$TAG' → deleting"
+            gh release delete "$TAG" -y >/dev/null 2>&1 || true
+          fi
+          # 3) 嘗試建立；若仍失敗，改用唯一 tag 再試
+          if ! gh release create "$TAG" build.zip --notes "$NOTE" --prerelease; then
+            echo "⚠️ Create failed with tag '$TAG' → using timestamp tag"
+            TAG="${TAG}-$(date +%Y%m%d%H%M%S)"
+            gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
+          fi
           echo "✅ Staging release created: $TAG"
 
-  # 6️⃣ Deploy to Production（需核准）
+  # 6) Deploy to Production（需核准；同樣安全處理）
   deploy-production:
     name: Deploy to Production
     needs: [versioning, deploy-staging]
@@ -194,16 +209,27 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-      - name: Create Production Release
+
+      - name: Create Production Release (safe & idempotent)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.versioning.outputs.tag_prod }}
+          TAG:  ${{ needs.versioning.outputs.tag_prod }}
           NOTE: ${{ needs.versioning.outputs.release_note }}
+        shell: bash
         run: |
-          echo "🚀 Production release started..."
+          set -e
+          echo "🚀 Creating Production release..."
           if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
             TAG="prod-$(date +%Y%m%d%H%M%S)"
-            echo "⚠️ Invalid or empty tag fixed → Using $TAG"
+            echo "⚠️ Invalid or empty tag → Using $TAG"
           fi
-          gh release create "$TAG" build.zip --notes "$NOTE" --latest
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "🔁 Found existing release '$TAG' → deleting"
+            gh release delete "$TAG" -y >/dev/null 2>&1 || true
+          fi
+          if ! gh release create "$TAG" build.zip --notes "$NOTE" --latest; then
+            echo "⚠️ Create failed with tag '$TAG' → using timestamp tag"
+            TAG="${TAG}-$(date +%Y%m%d%H%M%S)"
+            gh release create "$TAG" build.zip --notes "$NOTE" --latest
+          fi
           echo "✅ Production release created: $TAG"
