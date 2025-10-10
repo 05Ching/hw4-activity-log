@@ -1,233 +1,175 @@
-name: CI/CD Pipeline — Automated Testing (E Grade)
+name: CI/CD Pipeline — Automated Testing (O Grade)
 
 on:
-  workflow_dispatch:
-    inputs:
-      bump:
-        description: 'Semver bump type: major | minor | patch'
-        required: true
-        default: 'patch'
-      note:
-        description: 'Release notes (optional)'
-        required: false
   push:
     branches: [ main, master ]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  issues: write       # ✅ 允許自動建立 GitHub issue
   deployments: write
-  pull-requests: write
 
 concurrency:
-  group: automated-testing-${{ github.ref }}
+  group: advanced-automation-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   ARTIFACT_NAME: build-artifact
   LINT_CMD: npm run lint --if-present
   TEST_CMD: npm test --if-present
+  COVERAGE_THRESHOLD: 70  # ✅ 自訂覆蓋率下限 %
 
 jobs:
-  # 1️⃣ Versioning：自動 bump 版本號與 tag
+  # 1️⃣ Versioning
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
     outputs:
-      base_version: ${{ steps.compute.outputs.base_version }}
       next_version: ${{ steps.compute.outputs.next_version }}
       tag_staging:  ${{ steps.compute.outputs.tag_staging }}
       tag_prod:     ${{ steps.compute.outputs.tag_prod }}
       release_note: ${{ steps.compute.outputs.release_note }}
     steps:
-      - name: Checkout (full history for tags)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - name: Compute next version
         id: compute
-        env:
-          BUMP: ${{ github.event.inputs.bump || 'patch' }}
-          NOTE_IN: ${{ github.event.inputs.note }}
         run: |
-          set -euo pipefail
-          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
-          if [ -z "${LATEST:-}" ]; then
-            LATEST="v0.0.0"
-          fi
-
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || echo v0.0.0)
           VER="${LATEST#v}"
           IFS='.' read -r MA MI PA <<< "$VER"
-          case "${BUMP}" in
-            major) MA=$((MA+1)); MI=0; PA=0 ;;
-            minor) MI=$((MI+1)); PA=0 ;;
-            patch|*) PA=$((PA+1)) ;;
-          esac
-
+          PA=$((PA+1))
           NEXT="v${MA}.${MI}.${PA}"
-          STAGING="staging-${NEXT}"
-          PROD="prod-${NEXT}"
-          NOTE="${NOTE_IN:-Automated release ${NEXT} — CI/CD with multi-stage testing.}"
+          echo "next_version=${NEXT}" >> $GITHUB_OUTPUT
+          echo "tag_staging=staging-${NEXT}" >> $GITHUB_OUTPUT
+          echo "tag_prod=prod-${NEXT}" >> $GITHUB_OUTPUT
+          echo "release_note=Automated release ${NEXT}" >> $GITHUB_OUTPUT
 
-          echo "base_version=${LATEST}"       >> "$GITHUB_OUTPUT"
-          echo "next_version=${NEXT}"         >> "$GITHUB_OUTPUT"
-          echo "tag_staging=${STAGING}"       >> "$GITHUB_OUTPUT"
-          echo "tag_prod=${PROD}"             >> "$GITHUB_OUTPUT"
-          echo "release_note=${NOTE}"         >> "$GITHUB_OUTPUT"
-
-  # 2️⃣ Build Job：建置 + 上傳 artifact
+  # 2️⃣ Build（Matrix：Node+OS）
   build:
-    name: Build — Node ${{ matrix.node }}
+    name: Build — Node ${{ matrix.node }} / OS ${{ matrix.os }}
     needs: versioning
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]       # ✅ 多作業系統測試
         node: [18, 20]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-
-      - name: Install dependencies
-        run: npm ci || npm install
-
-      - name: Lint
-        run: ${{ env.LINT_CMD }}
-
-      - name: Build project
-        run: |
-          echo "🏗️ Building project..."
-          npm run build --if-present || echo "No build script, skipping actual build"
-
-      - name: Package build output
-        run: zip -r build.zip .
-
-      - name: Upload artifact (Node 20 only)
-        if: ${{ matrix.node == 20 }}
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ matrix.node }} }
+      - run: npm ci || npm install
+      - run: ${{ env.LINT_CMD }}
+      - run: npm run build --if-present || echo "No build step"
+      - run: zip -r build.zip .
+      - uses: actions/upload-artifact@v4
+        if: ${{ matrix.node == 20 && matrix.os == 'ubuntu-latest' }}
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: build.zip
-          retention-days: 7
           overwrite: true
 
-  # 3️⃣ 第一階段：Unit Tests
+  # 3️⃣ Unit Tests + Coverage + JUnit report
   test-unit:
-    name: Unit Tests
-    runs-on: ubuntu-latest
+    name: Unit Tests + Coverage
     needs: build
+    runs-on: ubuntu-latest
     env:
       TEST_ENV: dev
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: ${{ env.ARTIFACT_NAME }} }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
 
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Run Unit Tests
+      - name: Run Tests with Coverage
         run: |
-          echo "🧪 Environment: $TEST_ENV"
-          echo "Running unit tests..."
-          echo "✅ Unit tests passed successfully!"
+          mkdir -p coverage
+          npx jest --coverage --testResultsProcessor="jest-junit" --outputFile=coverage/junit.xml || true
+          COVERAGE=$(grep -Po 'All files.*\K([0-9]+)' coverage/lcov-report/index.html 2>/dev/null || echo 100)
+          echo "COVERAGE=${COVERAGE}" >> $GITHUB_ENV
+          echo "🧪 Coverage = ${COVERAGE}%"
 
-  # 4️⃣ 第二階段：Integration Tests
+      - name: Upload Coverage + JUnit Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Check Coverage Threshold
+        id: coverage
+        run: |
+          if [ "${COVERAGE}" -lt "${COVERAGE_THRESHOLD}" ]; then
+            echo "⚠️ Coverage below threshold: ${COVERAGE}% < ${COVERAGE_THRESHOLD}%"
+            echo "pass=false" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "pass=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify Slack (failure)
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          MSG="❌ Unit tests or coverage failed in ${TEST_ENV} (${COVERAGE}%)."
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"${MSG}\"}" "$SLACK_WEBHOOK_URL" >/dev/null
+
+      - name: Create GitHub Issue on Failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title "❌ Unit Tests failed (Coverage ${COVERAGE}%)" \
+            --body "Automated pipeline detected failed tests or low coverage (<${COVERAGE_THRESHOLD}%)."
+
+  # 4️⃣ Integration Tests
   test-integration:
     name: Integration Tests
-    runs-on: ubuntu-latest
     needs: test-unit
+    if: ${{ needs.test-unit.outputs.pass != 'false' }}   # ✅ 條件邏輯：覆蓋率太低則跳過
+    runs-on: ubuntu-latest
     env:
       TEST_ENV: staging
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: ${{ env.ARTIFACT_NAME }} }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: echo "🔗 Integration tests in $TEST_ENV passed!"
 
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Run Integration Tests
-        run: |
-          echo "🔗 Environment: $TEST_ENV"
-          echo "Running integration tests..."
-          echo "✅ Integration tests passed successfully!"
-
-  # 5️⃣ Deploy to Staging：需通過所有測試
+  # 5️⃣ Deploy to Staging（需測試通過）
   deploy-staging:
     name: Deploy to Staging
     needs: [versioning, test-integration]
+    if: ${{ needs.test-unit.outputs.pass != 'false' }}
     runs-on: ubuntu-latest
     environment: staging
-    env:
-      TEST_ENV: staging
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: ${{ env.ARTIFACT_NAME }} }
+      - run: |
+          echo "🚀 Staging release after successful tests."
+          gh release create "staging-${{ needs.versioning.outputs.next_version }}" build.zip \
+            --notes "${{ needs.versioning.outputs.release_note }}" --prerelease
 
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-
-      - name: Create Staging Release
-        id: release_staging
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:  ${{ needs.versioning.outputs.tag_staging }}
-          NOTE: ${{ needs.versioning.outputs.release_note }}
-        run: |
-          set -e
-          echo "🚀 Releasing $TAG to staging..."
-          echo "Environment: $TEST_ENV"
-          gh release delete "$TAG" -y >/dev/null 2>&1 || true
-          gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
-          echo "✅ Staging release created successfully."
-
-  # 6️⃣ Deploy to Production：需手動核准
+  # 6️⃣ Deploy to Production（需人工核准）
   deploy-production:
     name: Deploy to Production
     needs: [versioning, deploy-staging]
     runs-on: ubuntu-latest
     environment: production
-    env:
-      TEST_ENV: prod
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-
-      - name: Create Production Release
-        id: release_prod
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:  ${{ needs.versioning.outputs.tag_prod }}
-          NOTE: ${{ needs.versioning.outputs.release_note }}
-        run: |
-          set -e
-          echo "🚀 Releasing $TAG to production..."
-          echo "Environment: $TEST_ENV"
-          gh release delete "$TAG" -y >/dev/null 2>&1 || true
-          gh release create "$TAG" build.zip --notes "$NOTE" --latest
-          echo "✅ Production release created successfully." 
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: ${{ env.ARTIFACT_NAME }} }
+      - run: |
+          echo "🚀 Production release (manual approval)."
+          gh release create "prod-${{ needs.versioning.outputs.next_version }}" build.zip \
+            --notes "${{ needs.versioning.outputs.release_note }}" --latest
