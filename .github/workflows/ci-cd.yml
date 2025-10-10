@@ -1,4 +1,4 @@
-name: CI/CD Pipeline — Automated Testing (O Grade — Cross-Platform Fixed)
+name: CI/CD Pipeline — Automated Testing (O Grade — Final Stable Version)
 
 on:
   push:
@@ -27,8 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       next_version: ${{ steps.compute.outputs.next_version }}
-      tag_staging:  ${{ steps.compute.outputs.tag_staging }}
-      tag_prod:     ${{ steps.compute.outputs.tag_prod }}
+      tag_staging: ${{ steps.compute.outputs.tag_staging }}
+      tag_prod: ${{ steps.compute.outputs.tag_prod }}
       release_note: ${{ steps.compute.outputs.release_note }}
     steps:
       - uses: actions/checkout@v4
@@ -43,10 +43,13 @@ jobs:
           IFS='.' read -r MA MI PA <<< "$VER"
           PA=$((PA+1))
           NEXT="v${MA}.${MI}.${PA}"
+          STAGING="staging-${NEXT}"
+          PROD="prod-${NEXT}"
+          NOTE="Automated release ${NEXT}"
           echo "next_version=${NEXT}" >> $GITHUB_OUTPUT
-          echo "tag_staging=staging-${NEXT}" >> $GITHUB_OUTPUT
-          echo "tag_prod=prod-${NEXT}" >> $GITHUB_OUTPUT
-          echo "release_note=Automated release ${NEXT}" >> $GITHUB_OUTPUT
+          echo "tag_staging=${STAGING}" >> $GITHUB_OUTPUT
+          echo "tag_prod=${PROD}" >> $GITHUB_OUTPUT
+          echo "release_note=${NOTE}" >> $GITHUB_OUTPUT
 
   # 2️⃣ Build（Matrix：Node + OS）
   build:
@@ -55,12 +58,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]   # ✅ 多作業系統
+        os: [ubuntu-latest, windows-latest]
         node: [18, 20]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -71,13 +73,12 @@ jobs:
       - name: Lint
         run: ${{ env.LINT_CMD }}
 
-      # 跳過 bun，作業重點在 CI/CD
       - name: Build project (skip bun)
         run: |
-          echo "🏗️ Skipping bun build (not required for this assignment)…"
+          echo "🏗️ Skipping bun build (not required for this project)…"
           echo "Build simulated."
 
-      # ✅ 以 OS 分開的跨平台壓縮步驟（避免 PowerShell 解析 bash 語法）
+      # ✅ Windows 打包
       - name: Package build output (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -86,13 +87,13 @@ jobs:
           if (Test-Path build.zip) { Remove-Item build.zip -Force }
           Compress-Archive -Path * -DestinationPath build.zip
 
+      # ✅ Linux/macOS 打包
       - name: Package build output (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           echo "📦 Packaging build output on $RUNNER_OS…"
           zip -r build.zip .
 
-      # 只在 Ubuntu / Node 20 上傳 artifact，避免重複
       - name: Upload artifact (Node 20 / Ubuntu only)
         if: ${{ matrix.node == 20 && matrix.os == 'ubuntu-latest' }}
         uses: actions/upload-artifact@v4
@@ -110,11 +111,9 @@ jobs:
       TEST_ENV: dev
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -123,7 +122,6 @@ jobs:
         run: |
           mkdir -p coverage
           npx jest --coverage --testResultsProcessor="jest-junit" --outputFile=coverage/junit.xml || true
-          # 嘗試從 HTML 報表抓 All files 的 %；若不存在（例如無 jest），就給 100 讓流程可示範
           COVERAGE=$(grep -Po 'All files.*\K([0-9]+)' coverage/lcov-report/index.html 2>/dev/null || echo 100)
           echo "COVERAGE=${COVERAGE}" >> $GITHUB_ENV
           echo "🧪 Coverage = ${COVERAGE}%"
@@ -164,7 +162,7 @@ jobs:
           gh issue create --title "❌ Unit Tests failed (Coverage ${COVERAGE}%)" \
             --body "Automated pipeline detected failed tests or low coverage (<${COVERAGE_THRESHOLD}%)."
 
-  # 4️⃣ Integration Tests（覆蓋率不達標則整段跳過）
+  # 4️⃣ Integration Tests
   test-integration:
     name: Integration Tests
     needs: test-unit
@@ -184,7 +182,7 @@ jobs:
         run: |
           echo "🔗 Integration tests in $TEST_ENV passed!"
 
-  # 5️⃣ Deploy to Staging（需測試通過）
+  # 5️⃣ Deploy to Staging（含自動修復 tag）
   deploy-staging:
     name: Deploy to Staging
     needs: [versioning, test-integration]
@@ -196,6 +194,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
+
       - name: Create Staging Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -203,6 +202,10 @@ jobs:
           NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
           echo "🚀 Staging release after successful tests."
+          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            TAG="staging-$(date +%Y%m%d%H%M%S)"
+            echo "⚠️ Invalid or empty tag fixed → Using $TAG"
+          fi
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
 
   # 6️⃣ Deploy to Production（需 reviewer 核准）
@@ -216,6 +219,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
+
       - name: Create Production Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -223,5 +227,9 @@ jobs:
           NOTE: ${{ needs.versioning.outputs.release_note }}
         run: |
           echo "🚀 Production release (manual approval)."
+          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            TAG="prod-$(date +%Y%m%d%H%M%S)"
+            echo "⚠️ Invalid or empty tag fixed → Using $TAG"
+          fi
           gh release delete "$TAG" -y >/dev/null 2>&1 || true
           gh release create "$TAG" build.zip --notes "$NOTE" --latest
