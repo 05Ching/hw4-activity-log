@@ -19,7 +19,7 @@ env:
   COVERAGE_THRESHOLD: 70
 
 jobs:
-  # 1️⃣ Versioning
+  # 1) Versioning：更健壯——從所有 tag 抓 vX.Y.Z 的最大值
   versioning:
     name: Versioning (auto-bump)
     runs-on: ubuntu-latest
@@ -33,21 +33,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute next version
+      - name: Compute next version (robust)
         id: compute
         shell: bash
         run: |
-          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || echo v0.0.0)
-          VER="${LATEST#v}"
+          set -euo pipefail
+          # 從所有 tag（vX.Y.Z / staging-vX.Y.Z / prod-vX.Y.Z）萃取 vX.Y.Z 版本並取最大
+          HIGHEST=$(git tag -l | sed -nE 's/.*(v[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | sort -V | tail -n1 || true)
+          if [[ -z "${HIGHEST:-}" ]]; then
+            HIGHEST="v0.0.0"
+          fi
+
+          VER="${HIGHEST#v}"
           IFS='.' read -r MA MI PA <<< "$VER"
+          MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
           PA=$((PA+1))
           NEXT="v${MA}.${MI}.${PA}"
-          echo "next_version=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "tag_staging=staging-${NEXT}" >> "$GITHUB_OUTPUT"
-          echo "tag_prod=prod-${NEXT}" >> "$GITHUB_OUTPUT"
+
+          echo "next_version=$NEXT"               >> "$GITHUB_OUTPUT"
+          echo "tag_staging=staging-${NEXT}"      >> "$GITHUB_OUTPUT"
+          echo "tag_prod=prod-${NEXT}"            >> "$GITHUB_OUTPUT"
           echo "release_note=Automated release ${NEXT} — CI/CD O Grade pipeline." >> "$GITHUB_OUTPUT"
 
-  # 2️⃣ Build (Matrix: Node 18/20 on Ubuntu & Windows)
+  # 2) Build（矩陣：Ubuntu/Windows × Node 18/20）
   build:
     name: Build — Node ${{ matrix.node }} / OS ${{ matrix.os }}
     needs: versioning
@@ -83,7 +91,9 @@ jobs:
           else
             zip -r build.zip .
           fi
+          ls -la
 
+      # 只上傳一次，避免 409
       - name: Upload artifact (Ubuntu + Node 20 only)
         if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == 20 }}
         uses: actions/upload-artifact@v4
@@ -93,7 +103,7 @@ jobs:
           overwrite: true
           retention-days: 7
 
-  # 3️⃣ Unit Tests + Coverage (mock)
+  # 3) Unit Tests（模擬）+ Coverage/JUnit 假檔案
   unit-tests:
     name: Unit Tests + Coverage
     runs-on: ubuntu-latest
@@ -125,10 +135,8 @@ jobs:
           COVERAGE=100
           echo "Coverage = $COVERAGE%"
           if [[ "$COVERAGE" -lt "${{ env.COVERAGE_THRESHOLD }}" ]]; then
-            echo "❌ Coverage below threshold ($COVERAGE% < ${{ env.COVERAGE_THRESHOLD }}%)"
             echo "pass=false" >> "$GITHUB_OUTPUT"
           else
-            echo "✅ Coverage above threshold"
             echo "pass=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -144,7 +152,7 @@ jobs:
           name: junit-report
           path: reports/
 
-  # 4️⃣ Integration Tests
+  # 4) Integration Tests（coverage 需通過才跑）
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
@@ -158,7 +166,7 @@ jobs:
           echo "🔗 Running integration tests..."
           echo "✅ Integration tests passed!"
 
-  # 5️⃣ Deploy to Staging
+  # 5) Deploy to Staging（增加 tag 自動修復）
   deploy-staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
@@ -169,19 +177,27 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-      - name: Create Staging Release
+
+      - name: Create Staging Release (safe + sanitize tag)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:  ${{ needs.versioning.outputs.tag_staging }}
-          NOTE: ${{ needs.versioning.outputs.release_note }}
+          TAG_IN:  ${{ needs.versioning.outputs.tag_staging }}
+          NOTE:    ${{ needs.versioning.outputs.release_note }}
         shell: bash
         run: |
-          echo "🚀 Creating Staging release..."
+          set -euo pipefail
+          TAG="$TAG_IN"
+          # 若 tag 不合法或為空，自動改為時間戳
+          if [[ -z "${TAG:-}" || ! "$TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            TAG="staging-$(date +%Y%m%d%H%M%S)"
+            echo "⚠️ Invalid/empty tag fixed → $TAG"
+          fi
+          echo "🚀 Creating Staging release: $TAG"
           gh release delete "$TAG" -y >/dev/null 2>&1 || true
           gh release create "$TAG" build.zip --notes "$NOTE" --prerelease
           echo "✅ Staging release created: $TAG"
 
-  # 6️⃣ Deploy to Production (Manual Approval)
+  # 6) Deploy to Production（需環境審核）
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
@@ -192,14 +208,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-      - name: Create Production Release
+
+      - name: Create Production Release (safe + sanitize tag)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:  ${{ needs.versioning.outputs.tag_prod }}
-          NOTE: ${{ needs.versioning.outputs.release_note }}
+          TAG_IN:  ${{ needs.versioning.outputs.tag_prod }}
+          NOTE:    ${{ needs.versioning.outputs.release_note }}
         shell: bash
         run: |
-          echo "🚀 Deploying to Production..."
+          set -euo pipefail
+          TAG="$TAG_IN"
+          if [[ -z "${TAG:-}" || ! "$TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            TAG="prod-$(date +%Y%m%d%H%M%S)"
+            echo "⚠️ Invalid/empty tag fixed → $TAG"
+          fi
+          echo "🚀 Creating Production release: $TAG"
           gh release delete "$TAG" -y >/dev/null 2>&1 || true
           gh release create "$TAG" build.zip --notes "$NOTE" --latest
-          echo "✅ Production release created successfully."
+          echo "✅ Production release created: $TAG"
