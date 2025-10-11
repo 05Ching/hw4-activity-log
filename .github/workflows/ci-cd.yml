@@ -1,4 +1,4 @@
-name: CI/CD Pipeline — Automated Testing (O Grade Final Version)
+name: CI/CD Pipeline — Automated Testing (O Grade Final Version, Fixed)
 
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
           echo "tag_prod=prod-${NEXT}" >> $GITHUB_OUTPUT
           echo "release_note=Automated release ${NEXT} — CI/CD O Grade pipeline." >> $GITHUB_OUTPUT
 
-  # 2️⃣ Build Matrix
+  # 2️⃣ Build Matrix (Ubuntu + Windows)
   build:
     name: Build — Node ${{ matrix.node }} / OS ${{ matrix.os }}
     needs: versioning
@@ -59,16 +59,21 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm install
-      - name: Package build output
+
+      # 跨平台打包
+      - name: Compress build artifact (cross-platform)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          echo "📦 Packaging build output..."
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "Detected Windows runner - using PowerShell to create ZIP."
-            pwsh -Command "Compress-Archive -Path * -DestinationPath build.zip"
-          else
-            echo "Detected Linux/macOS runner - using zip command."
-            zip -r build.zip .
-          fi
+          Write-Host "📦 Using PowerShell to zip files on Windows..."
+          Compress-Archive -Path * -DestinationPath build.zip -Force
+
+      - name: Compress build artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          echo "📦 Using zip command on Linux/macOS..."
+          zip -r build.zip .
+
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == 20 }}
         with:
